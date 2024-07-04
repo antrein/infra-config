@@ -1,0 +1,4 @@
+master:
+  password: "antre1n"
+persistence:
+  enabled: true

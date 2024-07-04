@@ -1,0 +1,86 @@
+name: "Docker push to GCR and deploy to GKE"
+
+on:
+  push:
+    branches:
+      - staging
+      - master
+  pull_request:
+    branches:
+      - master
+    types: [closed]
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image to GCR
+    if: github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_NAME: gcr.io/${{ secrets.GCP_PROJECT_ID }}
+      GCR_TAG: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup ServiceAccount
+        uses: nowactions/envsubst@v1
+        env:
+          SAJSON: ${{ secrets.SAJSON }}
+        with:
+          input: ./sa.json.template
+          output: ./sa.json
+
+      - name: Setup env
+        uses: nowactions/envsubst@v1
+        env:
+          ENV: ${{ github.ref == 'refs/heads/master' && secrets.ENV_PROD || secrets.ENV_STG }}
+        with:
+          input: ./.env.template
+          output: ./.env
+
+      - name: Print .env file
+        run: cat .env
+
+      - name: Setup GCP
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.SAJSON }}
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build and Push Docker image
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            docker build . -t $IMAGE_NAME/be-production:${GCR_TAG}
+            docker push $IMAGE_NAME/be-production:${GCR_TAG}
+          elif [ "${{ github.ref }}" = "refs/heads/staging" ]; then
+            docker build . -t $IMAGE_NAME/be-staging:${GCR_TAG}
+            docker push $IMAGE_NAME/be-staging:${GCR_TAG}
+          fi
+
+  deploy-to-gke:
+    name: Deploy to GKE
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    env:
+      K8S_NAMESPACE: ${{ github.ref == 'refs/heads/master' && 'production' || 'staging' }}
+      K8S_CLUSTER: your-gke-cluster-name
+      K8S_ZONE: your-gke-cluster-zone
+
+    steps:
+      - name: Setup GCP
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.SAJSON }}
+
+      - name: Get Kubernetes credentials
+        run: gcloud container clusters get-credentials $K8S_CLUSTER --zone $K8S_ZONE --project ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to GKE
+        run: kubectl apply -f k8s/$K8S_NAMESPACE.yaml -n $K8S_NAMESPACE
